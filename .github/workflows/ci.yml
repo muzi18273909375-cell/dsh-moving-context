@@ -23,7 +23,12 @@ jobs:
         run: |
           node --check src/move-session.mjs
           node --check src/e2e-check.mjs
+          node --check lib/core.js
+          node --check lib/index.js
+          node --check lib/client.js
           node --check test/run-tests.mjs
           node --check test/make-fixture.mjs
+          node --check test/host-core.mjs
+          node --check test/client-smoke.mjs
       - name: 跑测试（合成沙箱，不碰真实数据）
         run: npm test

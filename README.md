@@ -18,6 +18,52 @@ DSH 认为「会话属于某个工作区」要同时满足两件事，两件都�
 
 三个都改了、并且重启 DSH，会话才会真的出现在目标工作区里。
 
+## 两种用法
+
+| 怎么用 | 适合 |
+| --- | --- |
+| **插件（图形）**：会话行右侧 `⋯` → 「移动此聊天…」→ 选目标工作区 | 平时手动搬，不用关工作台 |
+| **命令行 / skill**：`--list` / `--move … --to …` | 批量搬、脚本化、agent 自己调 |
+
+插件装好之后：
+
+```
+侧栏 默认工作区
+  某个对话        ⋯  ─┬─ 重命名
+                       ├─ 移动此聊天…   ← 这里
+                       └─ 删除
+```
+
+点「移动此聊天…」弹出工作区列表（带每个工作区有多少个对话），选一个就搬。
+插件走的是 DSH 自己的成员表（`WorkspaceEntity.attachSession/detachSession`）加索引重建，
+**不需要退出工作台**；命令行那半必须退出，因为它直接改 `workspace.json`。
+
+### 装插件
+
+```bash
+# 1) 把整个包放进 DSH 的插件目录
+xcopy /E /I . "%USERPROFILE%\.dsh\plugins\dsh-moving-context"      # Windows
+cp -r . ~/.dsh/plugins/dsh-moving-context                          # macOS / Linux
+
+# 2) 注册进 profile：~/.dsh/profiles/desktop/package.json
+#    dependencies 里加  "dsh-moving-context": "link:<上面的绝对路径>"
+#    dsh.profile.bundles 里加  "dsh-moving-context"
+
+# 3) 装依赖（在 profile 目录）
+cd ~/.dsh/profiles/desktop && pnpm install
+
+# 4) 重启 DeepSeek Harness（客户端插件在启动时加载）
+```
+
+插件接口（本地回环，不联网）：
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/dsh-moving-context/api/list` | 列工作区与各自会话数 |
+| `POST` | `/dsh-moving-context/api/move` | `{sessionId, workspaceId}` 搬家，返回帧数/记录数/备份目录 |
+
+正在打开的那个对话拒绝搬（返回 409），先切到别的对话——文件被重写的同时它还在写盘会出事。
+
 ## 安装
 
 需要 Node.js ≥ 22.15（用到内置 zstd）。

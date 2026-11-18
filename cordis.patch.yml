@@ -1,0 +1,7 @@
+# Bundle layer for dsh-moving-context（会话搬家插件）。
+#
+# 手动安装路径：把下面这段插进 profile 的 cordis.patch.yml，
+# 并在 profile 的 package.json 里加依赖 + 把 dsh-moving-context 写进 dsh.profile.bundles。
+- insert:
+    - id: moving-context
+      name: dsh-moving-context

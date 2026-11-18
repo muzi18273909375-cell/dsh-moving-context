@@ -1,10 +1,11 @@
 {
   "name": "dsh-moving-context",
-  "version": "0.1.0",
-  "description": "可自由移动工作区内的对话：把 DeepSeek Harness 的会话在任意工作区之间搬家（官方没有这个功能），带帧重建、归属同步、备份与三重校验。",
+  "version": "0.2.0",
+  "description": "可自由移动工作区内的对话：把 DeepSeek Harness 的会话在任意工作区之间搬家（官方没有这个功能）。命令行、DSH 插件（会话行 ⋯ → 移动此聊天）与 skill 三件套，带帧重建、成员表同步、备份与三重校验。",
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "session",
     "workspace",
     "zstd",
@@ -15,19 +16,37 @@
   "engines": {
     "node": ">=22.15"
   },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./core": "./lib/core.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "dsh-moving-context": "src/move-session.mjs"
   },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
   "files": [
+    "lib/",
     "src/",
     "skill/",
     "docs/",
+    "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/run-tests.mjs",
-    "test:keep": "node test/run-tests.mjs --keep",
+    "test": "node test/run-tests.mjs && node test/host-core.mjs && node test/client-smoke.mjs",
+    "test:keep": "node test/run-tests.mjs --keep && node test/host-core.mjs --keep",
     "list": "node src/move-session.mjs --list",
     "verify-dsh": "node src/e2e-check.mjs"
   },
