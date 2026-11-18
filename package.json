@@ -56,7 +56,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/USERNAME/dsh-moving-context.git"
+    "url": "git+https://github.com/muzi18273909375-cell/dsh-moving-context.git"
+  },
+  "homepage": "https://github.com/muzi18273909375-cell/dsh-moving-context#readme",
+  "bugs": {
+    "url": "https://github.com/muzi18273909375-cell/dsh-moving-context/issues"
   },
   "author": "YG"
 }
