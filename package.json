@@ -1,0 +1,39 @@
+{
+  "name": "dsh-moving-context",
+  "version": "0.1.0",
+  "description": "可自由移动工作区内的对话：把 DeepSeek Harness 的会话在任意工作区之间搬家（官方没有这个功能），带帧重建、归属同步、备份与三重校验。",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "session",
+    "workspace",
+    "zstd",
+    "cli"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.15"
+  },
+  "bin": {
+    "dsh-moving-context": "src/move-session.mjs"
+  },
+  "files": [
+    "src/",
+    "skill/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/run-tests.mjs",
+    "test:keep": "node test/run-tests.mjs --keep",
+    "list": "node src/move-session.mjs --list",
+    "verify-dsh": "node src/e2e-check.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/USERNAME/dsh-moving-context.git"
+  },
+  "author": "YG"
+}
