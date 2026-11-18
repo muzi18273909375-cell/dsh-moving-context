@@ -40,20 +40,7 @@ DSH 认为「会话属于某个工作区」要同时满足三件事，三件都�
 
 ### 装插件
 
-```bash
-# 1) 把整个包放进 DSH 的插件目录
-xcopy /E /I . "%USERPROFILE%\.dsh\plugins\dsh-moving-context"      # Windows
-cp -r . ~/.dsh/plugins/dsh-moving-context                          # macOS / Linux
-
-# 2) 注册进 profile：~/.dsh/profiles/desktop/package.json
-#    dependencies 里加  "dsh-moving-context": "link:<上面的绝对路径>"
-#    dsh.profile.bundles 里加  "dsh-moving-context"
-
-# 3) 装依赖（在 profile 目录）
-cd ~/.dsh/profiles/desktop && pnpm install
-
-# 4) 重启 DeepSeek Harness（客户端插件在启动时加载）
-```
+装法见下面 [安装](#安装)（Windows 与 macOS 分开写）。装完要重启应用；之后客户端半边的改动按一次 `Ctrl+R`（macOS `⌘R`）就热更，不必重启整个应用。
 
 插件接口（本地回环，不联网）：
 
@@ -72,30 +59,96 @@ cd ~/.dsh/profiles/desktop && pnpm install
 
 ## 安装
 
-需要 Node.js ≥ 22.15（用到内置 zstd）。
+Windows 和 macOS 都能装、都能跑。下面的命令两边分开写，照着自己那半边抄就行。
+
+| 平台 | 状态 |
+| --- | --- |
+| Windows 10 / 11 | 实机验证 + CI（windows-latest，node 22 / 24） |
+| macOS（Intel / Apple Silicon） | CI 验证（macos-latest，node 22 / 24） |
+| Linux | CI 验证（ubuntu-latest，node 22 / 24） |
+
+### 第 0 步：Node.js ≥ 22.15（内置 zstd，低了直接跑不起来）
+
+```powershell
+winget install OpenJS.NodeJS.LTS          # Windows
+```
+```bash
+brew install node                          # macOS（或 nvm install 22 && nvm use 22）
+node -v                                    # 两个平台都要 ≥ v22.15
+```
+
+### 第 1 步：拿代码
 
 ```bash
 git clone https://github.com/USERNAME/dsh-moving-context.git
 cd dsh-moving-context
-node src/move-session.mjs --help
+node src/move-session.mjs --help           # 能打出帮助就说明 Node 版本够了
 ```
 
-装成命令（可选）：
+### 第 2 步：装图形插件（侧栏那个「移动此聊天…」）
+
+**Windows**
+
+```powershell
+xcopy /E /I . "%USERPROFILE%\.dsh\plugins\dsh-moving-context"
+# 编辑 %USERPROFILE%\.dsh\profiles\desktop\package.json：
+#   dependencies 里加       "dsh-moving-context": "link:C:/Users/<你的用户名>/.dsh/plugins/dsh-moving-context"
+#   dsh.profile.bundles 里加 "dsh-moving-context"
+cd "%USERPROFILE%\.dsh\profiles\desktop"
+pnpm install
+```
+
+**macOS**
+
+```bash
+mkdir -p ~/.dsh/plugins && cp -r . ~/.dsh/plugins/dsh-moving-context
+# 编辑 ~/.dsh/profiles/desktop/package.json：
+#   dependencies 里加       "dsh-moving-context": "link:/Users/<你的用户名>/.dsh/plugins/dsh-moving-context"
+#   dsh.profile.bundles 里加 "dsh-moving-context"
+cd ~/.dsh/profiles/desktop && pnpm install
+```
+
+两边一样的收尾：**完全退出 DeepSeek Harness 再打开**（macOS 用 `⌘Q`，只关窗口不算退出）。
+插件是随应用启动加载的，装完不重启不会出现。
+
+> `link:` 后面写**绝对路径**、用正斜杠；`~` 不会被 pnpm 展开，老老实实写 `/Users/xxx`。
+
+### 第 3 步：装成 skill（agent 能自己调，推荐）
+
+`skill/` 里的脚本是自包含的（已经把 `lib/core.js` 内联进去），拷这一个目录就够：
+
+```powershell
+xcopy /E /I skill "%USERPROFILE%\.dsh\skills\dsh-moving-context"                    # Windows
+```
+```bash
+mkdir -p ~/.dsh/skills/dsh-moving-context && cp -r skill/. ~/.dsh/skills/dsh-moving-context/   # macOS
+```
+
+### 第 4 步：验证装好了
+
+```bash
+node src/move-session.mjs --list            # 能列出工作区和会话就对了
+```
+
+界面上：侧栏某个对话右侧 hover 出 `⋯` → 菜单里有「移动此聊天…」。
+
+> 改了 `lib/core.js` 或 `src/move-session.mjs` 之后，跑一次 `npm run build:skill` 重新生成 skill 里的副本；
+> `test/skill-bundle.mjs` 会拦住忘了同步的提交。
+
+### macOS 上要多知道两句
+
+- 数据根目录跟 Windows 一样是 `~/.dsh`（`sessions/`、`storages/`、`profiles/`）。
+- 临时目录是符号链接：`/var/...` 实际指向 `/private/var/...`。工具内部一律按 `realpath` 比较路径，
+  所以中文目录、带空格的目录、符号链接目录都不会被判成两个工作区；自己写脚本调它时也别拿未解析的路径去比。
+- 命令行那半的「工作台在跑就拒跑」护栏，在 mac 上认的是 `DeepSeek Harness` 这个进程名（不是 `dsh`）。
+- 用 Homebrew 装的 Node 不需要 `sudo`；`npm link` 若报权限错，说明 Node 装在了系统目录，换 nvm 更省事。
+
+### 命令（可选）
 
 ```bash
 npm link          # 之后直接 dsh-moving-context --list
 ```
 
-作为 DSH skill 用（推荐，agent 可以自己调）：
-
-```bash
-# skill/ 里的脚本是自包含的（已经内联了 lib/core.js），拷这一个目录就够
-xcopy /E /I skill "%USERPROFILE%\.dsh\skills\dsh-moving-context"                    # Windows
-mkdir -p ~/.dsh/skills/dsh-moving-context && cp -r skill/. ~/.dsh/skills/dsh-moving-context/   # macOS / Linux
-```
-
-> 改了 `lib/core.js` 或 `src/move-session.mjs` 之后，跑一次 `npm run build:skill` 重新生成 skill 里的副本；
-> `test/skill-bundle.mjs` 会拦住忘了同步的提交。
 
 ## 用法
 
@@ -151,13 +204,14 @@ node src/move-session.mjs --list --json
 
 搬家中途任何一步失败都会自己回滚：新写的目标目录删掉、旧目录原地不动，并且报出可读原因（不会留下「两份会话」这种烂摊子）。
 
-## 五个必须知道的坑
+## 六个必须知道的坑
 
 1. **第一帧必须恰好只有一行 header。** DSH 的 `assertZstdHeaderFrame` 要求第一帧解压后「非空，且唯一的换行在末尾」。把整份文件重压成一帧 → `corrupt Zstandard session log: first frame is not exactly one header line` → 会话被 `listArtifacts` 跳过 → 界面看不到，且没有任何报错。
 2. **别在 DSH 运行时改 `workspace.json`。** 它保存工作区状态时是整份覆盖。命令行工具会自己检测并拒绝，插件走内存里的成员表所以不受这条限制。
 3. **`--verify` 通过 ≠ 界面能看到。** 还要 `workspace.json` 的成员关系对、还要重启。三个条件缺一个都不显示，且全程静默。
 4. **往 `kind: "list"` 的 slot 注册时必须给 `id`。** `ctx.slots.register({ name, id }, Component)` 少了 `id`，客户端直接抛 `list slot "sidebar.workspaces.session.menu.item" requires options.id`，插件其余部分照常加载、界面里就是少一条菜单，只有开发者工具的 Console 里看得到。客户端半边的改动按一次 `Ctrl+R` 就重新加载，不必重启整个应用。
 5. **工作区路径结尾有全角字符时别手抄。** Windows 上确实存在 `红利工作台的迭代与维稳。`（结尾是 U+3002）这种目录，路径比较一律走 `realpath` + 大小写归一，差一个字符都会被判成两个工作区。
+6. **macOS / Linux 上路径一律按真实路径算。** 临时目录 `/var/...` 实际是 `/private/var/...` 的软链接、Windows 的目录联接也一样：同一个目录能算出两个 `projectKey`。工具内部会同时试「登记路径」和「realpath」两种 key，自己写脚本调它时也别拿未解析的路径去比。
 
 细节机制（帧格式、projectKey 规则、源码位置）：[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
 版本与加固记录：[CHANGELOG.md](CHANGELOG.md)
@@ -189,7 +243,7 @@ npm run test:scale  # 只跑规模 / 回滚 / 坏文件那 12 项
 npm run build:skill # 重新生成 skill 里的自包含脚本
 ```
 
-在临时目录里造合成数据跑全套（67 项断言），不碰你真实的 `~/.dsh`：
+在临时目录里造合成数据跑全套（68 项断言），不碰你真实的 `~/.dsh`：
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
@@ -209,6 +263,8 @@ npm run build:skill # 重新生成 skill 里的自包含脚本
 - 在两个真实工作区之间用界面上的「移动此聊天…」搬过，侧栏立刻变成目标工作区的那一行，不需要重启。
 - `--home` 指向临时目录的完整演练通过；1200 会话 / 6 工作区的规模测试通过。
 - 搬移后 DSH 自己的 `sessionPersistence.list()` 判 `formatStatus=current`。
+- Windows（实机）与 macOS / Ubuntu（GitHub Actions，node 22 / 24）三平台六任务全绿；
+  macOS 的 `/var → /private/var` 软链接场景用 Windows 目录联接复现过，六套 68 项同样全过。
 
 ## 卸载
 
