@@ -16,6 +16,9 @@ import { readSessionFile } from '../lib/core.js';
 
 const { handleList, handleMove } = __testing;
 
+// macOS 的临时目录是符号链接（/var → /private/var）；插件写进 header 的是真实路径
+const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+
 let passed = 0;
 let failed = 0;
 const ok = async (name, fn) => {
@@ -181,9 +184,9 @@ try {
     }), res);
     assert.equal(res.status, 200, JSON.stringify(res.payload));
     assert.equal(res.payload.relocated, true);
-    const newFile = path.join(fixture.home, 'sessions', projectKey(fs.realpathSync(fixture.dstPath)), victim.id, 'session.v4.jsonl.zstd');
+    const newFile = path.join(fixture.home, 'sessions', projectKey(real(fixture.dstPath)), victim.id, 'session.v4.jsonl.zstd');
     assert.equal(fs.existsSync(newFile), true);
-    assert.equal(readSessionFile(newFile).header.cwd, fs.realpathSync(fixture.dstPath));
+    assert.equal(fs.realpathSync(readSessionFile(newFile).header.cwd), real(fixture.dstPath));
     assert.equal(memberships.get('ws-beta').includes(victim.id), true);
     assert.equal(memberships.get('ws-alpha').includes(victim.id), false);
   });
@@ -199,8 +202,10 @@ try {
 
   await ok('成员表 attach 失败 → 文件搬回原工作区，不留下谁也不认的会话', async () => {
     const second = fixture.sessions[1];
-    const src2 = path.join(fixture.home, 'sessions', projectKey(fixture.srcPath), second.id, 'session.v4.jsonl.zstd');
-    assert.equal(fs.existsSync(src2), true);
+    // 静置时文件在未解析路径的 key 下；插件写回时会用真实路径的 key
+    const src2raw = path.join(fixture.home, 'sessions', projectKey(fixture.srcPath), second.id, 'session.v4.jsonl.zstd');
+    const src2 = path.join(fixture.home, 'sessions', projectKey(real(fixture.srcPath)), second.id, 'session.v4.jsonl.zstd');
+    assert.equal(fs.existsSync(src2raw), true);
     registry.failAttachFor = 'ws-beta';
     const res = fakeRes();
     await handleMove(hostCtx, fakeReq({
@@ -212,7 +217,7 @@ try {
     assert.equal(fs.existsSync(src2), true, '文件应该被搬回原工作区');
     assert.equal(memberships.get('ws-alpha').includes(second.id), true, '原工作区成员关系还在');
     assert.equal(memberships.get('ws-beta').includes(second.id), false);
-    assert.equal(readSessionFile(src2).header.cwd, fixture.srcPath);
+    assert.equal(fs.realpathSync(readSessionFile(src2).header.cwd), real(fixture.srcPath));
   });
 
   await ok('目标工作区目录不在（工作区还登记着）→ 409，文件不动', async () => {

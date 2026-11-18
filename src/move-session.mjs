@@ -62,6 +62,10 @@ const JSON_OUT = flag('json');
 
 // ---------------------------------------------------------------- 运行中的 DSH
 const APP_IMAGE = 'DeepSeek Harness.exe';
+// macOS 上 Electron 进程的名字是「DeepSeek Harness」（带空格），没有 dsh 字样，
+// 所以 POSIX 要按平台各试一遍，任一命中就算在工作台在跑。
+const POSIX_APP_PATTERNS =
+  process.platform === 'darwin' ? ['DeepSeek Harness', 'dsh'] : ['dsh'];
 
 function runningDsh() {
   try {
@@ -73,9 +77,20 @@ function runningDsh() {
       });
       return out.includes(APP_IMAGE) ? APP_IMAGE : undefined;
     }
-    const out = execFileSync('pgrep', ['-fl', 'dsh'], { encoding: 'utf8', timeout: 8000 });
-    const hit = out.split('\n').find((line) => /dsh(\.exe)?\b/i.test(line) && !line.includes('move-session'));
-    return hit?.trim();
+    for (const pattern of POSIX_APP_PATTERNS) {
+      let out;
+      try {
+        out = execFileSync('pgrep', ['-fl', pattern], { encoding: 'utf8', timeout: 8000 });
+      } catch {
+        continue; // pgrep 没命中时退出码非零
+      }
+      const hit = out
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.length > 0 && !/move-session|dsh-moving-context/.test(line));
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
