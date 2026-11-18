@@ -105,15 +105,29 @@ ok('模块被 __ModuleLoader__ 接住，导出了 apply/inject', () => {
   assert.deepEqual(loaded.exports.inject, ['slots']);
 });
 
+// 这两个行为是照 DSH 真实实现抄的，缺一个都会让 UI 里少一条菜单：
+//   1) ctx.slots.inject(name, 工厂) 的工厂返回 generator，register 的返回值要 yield 出去；
+//   2) kind: "list" 的 slot 调 register 必须带 options.id，否则抛
+//      `list slot "…" requires options.id`（真实客户端报错就是这句）。
+const LIST_SLOTS = new Set(['sidebar.workspaces.session.menu.item']);
+
 const registered = [];
 const ctx = {
   slots: {
-    inject(name, fn) {
+    inject(name, factory) {
       registered.push({ name, viaInject: true });
-      fn();
+      const out = factory();
+      if (out !== undefined && out !== null && typeof out.next === 'function') {
+        for (const item of out) registered.push(item);
+      }
     },
     register(definition, component) {
-      registered.push({ name: definition.name, component });
+      if (LIST_SLOTS.has(definition.name) && typeof definition.id !== 'string') {
+        throw new Error('list slot "' + definition.name + '" requires options.id');
+      }
+      const entry = { name: definition.name, id: definition.id, component };
+      registered.push(entry);
+      return entry;
     },
   },
 };
@@ -123,6 +137,7 @@ ok('apply 往会话行菜单里注册了菜单项', () => {
   const hit = registered.find((r) => r.name === 'sidebar.workspaces.session.menu.item' && r.component);
   assert.ok(hit, '没有注册 sidebar.workspaces.session.menu.item');
   assert.equal(typeof hit.component, 'function');
+  assert.equal(hit.id, 'moving-context', 'list slot 必须带 id，否则客户端会抛 requires options.id');
 });
 
 ok('样式只注入一次', () => {

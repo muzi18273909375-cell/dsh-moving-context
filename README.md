@@ -127,11 +127,12 @@ node src/e2e-check.mjs "$HOME/.dsh/sessions" session-90d0ddd1-4a79-48e4-aedc-d8d
 
 把这三样拷回原位、重启，就回到搬之前。
 
-## 三个必须知道的坑
+## 四个必须知道的坑
 
 1. **第一帧必须恰好只有一行 header。** DSH 的 `assertZstdHeaderFrame` 要求第一帧解压后「非空，且唯一的换行在末尾」。把整份文件重压成一帧 → `corrupt Zstandard session log: first frame is not exactly one header line` → 会话被 `listArtifacts` 跳过 → 界面看不到，且没有任何报错。
 2. **别在 DSH 运行时改。** 它保存工作区状态时是整份覆盖。
 3. **`--verify` 通过 ≠ 界面能看到。** 还要 `workspace.json` 的成员关系对、还要重启。三个条件缺一个都不显示，且全程静默。
+4. **往 `kind: "list"` 的 slot 注册时必须给 `id`。** `ctx.slots.register({ name, id }, Component)` 少了 `id`，客户端直接抛 `list slot "sidebar.workspaces.session.menu.item" requires options.id`，插件其余部分照常加载、界面里就是少一条菜单，只有开发者工具的 Console 里看得到。客户端半边的改动按一次 `Ctrl+R` 就重新加载，不必重启整个应用。
 
 细节机制（帧格式、projectKey 规则、源码位置）：[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
 
