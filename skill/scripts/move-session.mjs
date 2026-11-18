@@ -121,12 +121,22 @@ const encodeSegment = (raw) => {
 const LOG_NAME = 'session.v4.jsonl.zstd';
 const isLogName = (n) => /^session\.v\d+\.jsonl\.zstd$/.test(n);
 
-/** Windows 上路径大小写不敏感，比较 cwd 必须归一 */
+/**
+ * 比较两个目录是否指向同一个位置。
+ * Windows 上大小写不敏感；POSIX 上 /var 与 /private/var 这类符号链接必须解析后再比，
+ * 否则 macOS 上「已经在目标工作区」会判错。
+ */
 function samePath(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const norm = (p) => {
-    const resolved = path.resolve(p).replace(/[\\/]+$/, '');
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    let resolved = path.resolve(p);
+    try {
+      resolved = fs.realpathSync.native(resolved);
+    } catch {
+      // 路径不存在时退回未解析的形式
+    }
+    const trimmed = resolved.replace(/[\\/]+$/, '') || resolved;
+    return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
   };
   return norm(a) === norm(b);
 }
@@ -562,7 +572,9 @@ function cmdMove() {
   const dest = findWorkspace(data, to);
   if (!dest) throw new Error(`找不到工作区: ${to}`);
   if (!fs.existsSync(dest.path)) throw new Error(`目标工作区目录不存在: ${dest.path}`);
-  const destPath = fs.realpathSync(dest.path);
+  // 用工作区登记的原样路径，不要 realpath：
+  // macOS 的 /var/... 会解析成 /private/var/...，写进 header 后和 DSH 记的路径对不上。
+  const destPath = dest.path.length > 1 ? dest.path.replace(/[\\/]+$/, '') : dest.path;
   console.log(`目标工作区: ${dest.title} [${dest.id}]\n  path=${destPath}`);
 
   const { items } = buildIndex(ROOT);
