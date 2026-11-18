@@ -52,6 +52,9 @@ const root = defaultRoot();
 fs.rmSync(root, { recursive: true, force: true });
 fs.mkdirSync(root, { recursive: true });
 const fx = makeFixture(root);
+// macOS 的临时目录是符号链接（/var → /private/var），CLI 写进 header 的是解析后的真实路径
+const realSrc = fs.realpathSync(fx.srcPath);
+const realDst = fs.realpathSync(fx.dstPath);
 
 try {
   console.log(`沙箱: ${root}`);
@@ -79,8 +82,8 @@ try {
     const { out } = run(['--move', s.title, '--to', 'ws-beta', '--home', root]);
     ok('搬完打印 OK', /OK .*records=40/.test(out));
 
-    const newFile = path.join(root, 'sessions', projectKey(fx.dstPath), s.id, 'session.v4.jsonl.zstd');
-    const oldFile = path.join(root, 'sessions', projectKey(fx.srcPath), s.id, 'session.v4.jsonl.zstd');
+    const newFile = path.join(root, 'sessions', projectKey(realDst), s.id, 'session.v4.jsonl.zstd');
+    const oldFile = path.join(root, 'sessions', projectKey(realSrc), s.id, 'session.v4.jsonl.zstd');
     ok('文件落到目标的 projectKey 目录', fs.existsSync(newFile));
     ok('源目录的会话文件已退场', !fs.existsSync(oldFile));
 
@@ -89,8 +92,8 @@ try {
     ok('源工作区 sessionIds 已移除', !ws.tables.workspaces[fx.srcWs].sessionIds.includes(s.id));
 
     const cache = JSON.parse(fs.readFileSync(path.join(root, 'storages', 'session_projcache', 'sessions', s.id + '.json'), 'utf8'));
-    ok('projcache identity.cwd 已改', cache.record.identity.cwd === fx.dstPath);
-    ok('projcache workingDirectory 已改', cache.record.rows.workingDirectory.val === fx.dstPath);
+    ok('projcache identity.cwd 已改', cache.record.identity.cwd === realDst);
+    ok('projcache workingDirectory 已改', cache.record.rows.workingDirectory.val === realDst);
     ok('projcache 标题没被弄坏', cache.record.rows.title.val === s.title);
 
     const backups = fs.readdirSync(path.join(root, 'session-move-backup'));
@@ -105,7 +108,7 @@ try {
     const { out } = run(['--verify', s.id, '--home', root]);
     ok('exactly-one-line=true', out.includes('exactly-one-line=true'));
     ok('records=40', out.includes('records=40'));
-    ok('cwd 是目标路径', out.includes(`cwd=${fx.dstPath}`));
+    ok('cwd 是目标路径', out.includes(`cwd=${realDst}`));
     ok('version=4', out.includes('version=4'));
   }
 
@@ -114,11 +117,11 @@ try {
     const s = fx.sessions[0];
     run(['--move', s.id, '--to', 'ws-beta', '--home', root]);
     const mid = run(['--verify', s.id, '--home', root]).out;
-    ok('搬到 beta 后 cwd 正确', mid.includes(`cwd=${fx.dstPath}`));
+    ok('搬到 beta 后 cwd 正确', mid.includes(`cwd=${realDst}`));
 
     run(['--move', s.id, '--to', 'ws-alpha', '--home', root]);
     const back = run(['--verify', s.id, '--home', root]).out;
-    ok('搬回后 cwd 复原', back.includes(`cwd=${fx.srcPath}`));
+    ok('搬回后 cwd 复原', back.includes(`cwd=${realSrc}`));
     ok('搬回后记录数不变', back.includes('records=1'));
 
     const ws = JSON.parse(fs.readFileSync(path.join(root, 'storages', 'workspace.json'), 'utf8'));

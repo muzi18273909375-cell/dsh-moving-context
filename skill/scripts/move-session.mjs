@@ -572,9 +572,9 @@ function cmdMove() {
   const dest = findWorkspace(data, to);
   if (!dest) throw new Error(`找不到工作区: ${to}`);
   if (!fs.existsSync(dest.path)) throw new Error(`目标工作区目录不存在: ${dest.path}`);
-  // 用工作区登记的原样路径，不要 realpath：
-  // macOS 的 /var/... 会解析成 /private/var/...，写进 header 后和 DSH 记的路径对不上。
-  const destPath = dest.path.length > 1 ? dest.path.replace(/[\\/]+$/, '') : dest.path;
+  // 写进 header 的 cwd 用真实路径：DSH 建会话时也解析过符号链接（macOS 的 /var → /private/var），
+  // 用原样路径会和 DSH 自己的记录不一致。
+  const destPath = fs.realpathSync(dest.path);
   console.log(`目标工作区: ${dest.title} [${dest.id}]\n  path=${destPath}`);
 
   const { items } = buildIndex(ROOT);
