@@ -2,16 +2,17 @@
 /**
  * move-session.mjs — 把 DSH 会话在「工作区」之间搬家（官方没有这个功能）。
  *
- * 用法（先完全退出 DeepSeek Harness）：
- *   node move-session.mjs --list
- *   node move-session.mjs --move <sessionId|标题关键词> --to <工作区标题|工作区id> [--dry] [--force]
+ * 用法（**先完全退出 DeepSeek Harness**，脚本会自己检查）：
+ *   node move-session.mjs --list [--json]
+ *   node move-session.mjs --move <sessionId|标题关键词> --to <工作区标题|工作区id|路径> [--dry] [--force]
  *   node move-session.mjs --verify <sessionId>
+ *   node move-session.mjs --frames <file>
  *
- * 可选：--home <DSH 数据根>   默认 C:\Users\<you>\.dsh
- *       --root <会话根>       默认 <home>\sessions
- *       --frames <file>       自检 zstd 帧扫描
+ * 可选：--home <DSH 数据根>   默认 ~/.dsh
+ *       --root <会话根>       默认 <home>/sessions
+ *       --workspace-json <file> / --projcache <dir>   演练或迁移时指到别处
  *
- * 它做的事（每一步都可回滚，备份统一放在 <home>\session-move-backup\<时间戳>\）：
+ * 它做的事（每一步都可回滚，备份统一放在 <home>/session-move-backup/<时间戳>/）：
  *   1. 定位会话文件，逐个 zstd 帧切开（照抄 DSH 的 scanZstdFrames）
  *   2. 第一帧重压成「单独一行 header + \n」，cwd 改成目标工作区路径；其余帧字节不动
  *   3. 按 DSH 的 projectKey 规则把文件放到新的工程目录，旧目录 retire 到备份
@@ -19,11 +20,25 @@
  *   5. 改 workspace.json：目标工作区 sessionIds 加进去，其它工作区移除
  *   6. 读回校验：帧结构、第一帧单行、cwd、记录数
  */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import zlib from 'node:zlib';
+import { execFileSync } from 'node:child_process';
+
+import {
+  assertSessionId,
+  countRecords,
+  decodeFrame,
+  encodeSegment,
+  firstLine,
+  isLogName,
+  LOG_NAME,
+  moveSessionFile,
+  projectKey,
+  readSessionFile,
+  scanZstdFrames,
+  updateProjcache,
+} from '../lib/core.js';
 
 // ---------------------------------------------------------------- 参数
 const argv = process.argv.slice(2);
@@ -43,89 +58,28 @@ const STAMP = new Date().toISOString().replace(/[:.]/g, '-');
 const BACKUP = path.join(HOME, 'session-move-backup', STAMP);
 const DRY = flag('dry');
 const FORCE = flag('force');
+const JSON_OUT = flag('json');
 
-const ZSTD_MAGIC = 0xfd2fb528;
+// ---------------------------------------------------------------- 运行中的 DSH
+const APP_IMAGE = 'DeepSeek Harness.exe';
 
-// ---------------------------------------------------------------- zstd 帧
-function scanZstdFrames(buf, maxFrames = Infinity) {
-  const out = [];
-  let offset = 0;
-  while (offset < buf.length && out.length < maxFrames) {
-    const start = offset;
-    if (buf.length - offset < 4) throw new Error(`truncated zstd frame magic at ${offset}`);
-    if (buf.readUInt32LE(offset) !== ZSTD_MAGIC) throw new Error(`bad zstd magic at ${offset}`);
-    offset += 4;
-    const fhd = buf[offset++];
-    const fcsFlag = fhd >> 6;
-    const singleSegment = (fhd >> 5) & 1;
-    const checksumFlag = (fhd >> 2) & 1;
-    const dictFlag = fhd & 3;
-    if (!singleSegment) offset += 1;                       // window descriptor
-    offset += [0, 1, 2, 4][dictFlag];                      // dictionary id
-    offset += [singleSegment ? 1 : 0, 2, 4, 8][fcsFlag];   // frame content size
-    for (;;) {
-      if (offset + 3 > buf.length) throw new Error(`truncated block header in frame at ${start}`);
-      const bh = buf.readUIntLE(offset, 3);
-      offset += 3;
-      const last = bh & 1;
-      const type = (bh >> 1) & 3;
-      const size = bh >>> 3;
-      offset += type === 1 ? 1 : size;
-      if (last) break;
+function runningDsh() {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${APP_IMAGE}`, '/NH'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 8000,
+      });
+      return out.includes(APP_IMAGE) ? APP_IMAGE : undefined;
     }
-    if (checksumFlag) offset += 4;
-    out.push(buf.subarray(start, offset));
+    const out = execFileSync('pgrep', ['-fl', 'dsh'], { encoding: 'utf8', timeout: 8000 });
+    const hit = out.split('\n').find((line) => /dsh(\.exe)?\b/i.test(line) && !line.includes('move-session'));
+    return hit?.trim();
+  } catch {
+    return undefined;
   }
-  return out;
 }
-
-const zstdFrame = (plaintext) => zlib.zstdCompressSync(plaintext, {
-  params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 },
-});
-
-const decodeFrame = (frame) => zlib.zstdDecompressSync(frame);
-
-const firstLine = (plaintext) => {
-  const nl = plaintext.indexOf(10);
-  if (nl === -1) throw new Error('header frame has no newline');
-  return plaintext.subarray(0, nl + 1);
-};
-
-/** DSH 的 projectKey：分隔符/盘符压成 -，其它不安全码元转 ~XXXX，首尾包 -- */
-function projectKey(cwd) {
-  if (!cwd) throw new Error('empty cwd');
-  let readable = '';
-  let separatorRun = false;
-  for (let i = 0; i < cwd.length; i++) {
-    const code = cwd.charCodeAt(i);
-    const ch = String.fromCharCode(code);
-    if (ch === '/' || ch === '\\' || ch === ':') {
-      if (!separatorRun) readable += '-';
-      separatorRun = true;
-    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
-      readable += ch;
-      separatorRun = false;
-    } else {
-      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0');
-      separatorRun = false;
-    }
-  }
-  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`;
-}
-
-const encodeSegment = (raw) => {
-  let out = '';
-  for (let i = 0; i < raw.length; i++) {
-    const code = raw.charCodeAt(i);
-    const ch = String.fromCharCode(code);
-    if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) out += ch;
-    else out += '~' + code.toString(16).toUpperCase().padStart(4, '0');
-  }
-  return out;
-};
-
-const LOG_NAME = 'session.v4.jsonl.zstd';
-const isLogName = (n) => /^session\.v\d+\.jsonl\.zstd$/.test(n);
 
 // ---------------------------------------------------------------- 扫描
 function listSessionDirs(root) {
@@ -134,22 +88,40 @@ function listSessionDirs(root) {
   for (const proj of fs.readdirSync(root, { withFileTypes: true })) {
     if (!proj.isDirectory()) continue;
     const projPath = path.join(root, proj.name);
-    for (const ses of fs.readdirSync(projPath, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(projPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ses of entries) {
       if (!ses.isDirectory()) continue;
       const dir = path.join(projPath, ses.name);
-      const files = fs.readdirSync(dir).filter(isLogName);
+      let files;
+      try {
+        files = fs.readdirSync(dir).filter(isLogName);
+      } catch {
+        continue;
+      }
       for (const f of files) out.push({ projectKey: proj.name, dir, file: path.join(dir, f) });
     }
   }
   return out;
 }
 
-function readHeader(file) {
-  const buf = fs.readFileSync(file);
-  const frames = scanZstdFrames(buf, 1);
-  const plain = decodeFrame(frames[0]);
-  const line = firstLine(plain);
-  return { buf, header: JSON.parse(line.toString('utf8')), frame1: frames[0], headerLength: line.length, frameCount: scanZstdFrames(buf).length };
+/** 一次读盘建索引：header 只解析一遍，坏文件记下来不中断 */
+function buildIndex(root) {
+  const items = [];
+  const broken = [];
+  for (const s of listSessionDirs(root)) {
+    try {
+      const { header, frame1 } = readSessionFile(s.file);
+      items.push({ ...s, id: header.id, cwd: header.cwd, headerBytes: frame1.length });
+    } catch (error) {
+      broken.push({ ...s, error: error.message });
+    }
+  }
+  return { items, broken };
 }
 
 function titleOf(id) {
@@ -159,7 +131,9 @@ function titleOf(id) {
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
     const rec = j?.record ?? j;
     return rec?.rows?.title?.val ?? rec?.title ?? undefined;
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------- 工作区
@@ -175,137 +149,177 @@ function workspaces(data) {
 
 function findWorkspace(data, needle) {
   const all = workspaces(data);
-  const lower = String(needle).toLowerCase();
-  return all.find((w) => w.id === needle)
-    ?? all.find((w) => String(w.title ?? '').toLowerCase().includes(lower))
-    ?? all.find((w) => String(w.path ?? '').toLowerCase().includes(lower));
+  const raw = String(needle);
+  const lower = raw.toLowerCase();
+  const byId = all.find((w) => w.id === raw);
+  if (byId) return byId;
+
+  const byExact = all.filter((w) => String(w.title ?? '').toLowerCase() === lower);
+  if (byExact.length === 1) return byExact[0];
+
+  const byPath = all.filter((w) => String(w.path ?? '').toLowerCase() === lower);
+  if (byPath.length === 1) return byPath[0];
+
+  const byFuzzy = all.filter(
+    (w) => String(w.title ?? '').toLowerCase().includes(lower) || String(w.path ?? '').toLowerCase().includes(lower),
+  );
+  if (byFuzzy.length === 1) return byFuzzy[0];
+  if (byFuzzy.length > 1) {
+    throw new Error(
+      `工作区名字太模糊，命中了 ${byFuzzy.length} 个：\n` +
+        byFuzzy.map((w) => `  - ${w.title} [${w.id}] ${w.path}`).join('\n') +
+        '\n请用完整标题或 id 指定。',
+    );
+  }
+  return undefined;
+}
+
+function guardRunning() {
+  const proc = runningDsh();
+  if (proc === undefined) return;
+  if (FORCE) {
+    console.warn(`⚠ 检测到 DSH 正在运行（${proc}），--force 已忽略该检查。`);
+    console.warn('  运行中改 workspace.json，退出时会被内存里的旧表覆盖 —— 除非你知道自己在做什么。');
+    return;
+  }
+  throw new Error(
+    `DeepSeek Harness 还在运行（${proc}）。\n` +
+      '它退出时会把内存里的工作区表整份写回，运行中搬的会话会被抹掉。\n' +
+      '先完全退出工作台（托盘也要退），再跑这个命令；确认无妨可以加 --force。',
+  );
 }
 
 // ---------------------------------------------------------------- 命令：list
 function cmdList() {
   const { data } = loadWorkspaceJson();
-  const ids = new Set();
-  for (const w of workspaces(data)) for (const s of w.sessionIds ?? []) ids.add(s);
+  const { items, broken } = buildIndex(ROOT);
+
+  if (JSON_OUT) {
+    const payload = {
+      home: HOME,
+      workspaces: workspaces(data).map((w) => ({
+        id: w.id,
+        title: w.title,
+        path: w.path,
+        sessions: (w.sessionIds ?? []).length,
+      })),
+      sessions: items.map((s) => {
+        const owner = workspaces(data)
+          .filter((w) => (w.sessionIds ?? []).includes(s.id))
+          .map((w) => w.title);
+        return {
+          id: s.id,
+          title: titleOf(s.id),
+          cwd: s.cwd,
+          file: s.file,
+          workspaces: owner,
+        };
+      }),
+      broken: broken.map((b) => ({ dir: b.dir, error: b.error })),
+    };
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
 
   console.log(`工作区（${WS_JSON}）`);
   for (const w of workspaces(data)) {
     console.log(`  [${w.id}] ${w.title}\n      path=${w.path}\n      sessions=${(w.sessionIds ?? []).length}`);
   }
 
-  console.log('\n磁盘上的会话');
-  for (const s of listSessionDirs(ROOT)) {
-    let h;
-    try { h = readHeader(s.file); } catch (e) {
-      console.log(`  BROKEN ${path.basename(s.dir)}  (${e.message})`);
-      continue;
-    }
-    const id = h.header.id;
-    const owner = workspaces(data).filter((w) => (w.sessionIds ?? []).includes(id)).map((w) => w.title);
-    console.log(`  ${id}\n      title=${titleOf(id) ?? '-'}\n      cwd=${h.header.cwd}\n      workspace=${owner.length ? owner.join(' / ') : '(未登记)'}\n      frames=${h.frameCount} headerBytes=${h.headerLength}`);
+  console.log(`\n磁盘上的会话（${items.length} 个）`);
+  for (const s of items) {
+    const owner = workspaces(data)
+      .filter((w) => (w.sessionIds ?? []).includes(s.id))
+      .map((w) => w.title);
+    console.log(
+      `  ${s.id}\n      title=${titleOf(s.id) ?? '-'}\n      cwd=${s.cwd}\n` +
+        `      workspace=${owner.length ? owner.join(' / ') : '(未登记)'}\n      headerBytes=${s.headerBytes}`,
+    );
+  }
+  if (broken.length > 0) {
+    console.log(`\n读不出 header 的（${broken.length} 个，DSH 也会跳过它们）`);
+    for (const b of broken) console.log(`  ${b.dir}\n      ${b.error}`);
   }
 }
 
 // ---------------------------------------------------------------- 命令：move
 function cmdMove() {
-  const targets = String(opt('move')).split(',').map((s) => s.trim()).filter(Boolean);
+  const targets = String(opt('move'))
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const to = opt('to');
-  if (!targets.length || !to) throw new Error('用法: --move <sessionId|标题关键词> --to <工作区标题|id> [--dry] [--force]');
+  if (!targets.length || to === undefined) {
+    throw new Error('用法: --move <sessionId|标题关键词> --to <工作区标题|id|路径> [--dry] [--force]');
+  }
 
-  const { text, data } = loadWorkspaceJson();
+  guardRunning();
+
+  const { data } = loadWorkspaceJson();
   const dest = findWorkspace(data, to);
   if (!dest) throw new Error(`找不到工作区: ${to}`);
   if (!fs.existsSync(dest.path)) throw new Error(`目标工作区目录不存在: ${dest.path}`);
   const destPath = fs.realpathSync(dest.path);
   console.log(`目标工作区: ${dest.title} [${dest.id}]\n  path=${destPath}`);
 
-  const all = listSessionDirs(ROOT);
+  const { items } = buildIndex(ROOT);
+
   const picked = [];
   for (const t of targets) {
     const lower = t.toLowerCase();
-    const hit = all.find((s) => {
-      try {
-        const h = readHeader(s.file).header;
-        return h.id === t || String(h.id).includes(lower) || String(titleOf(h.id) ?? '').toLowerCase().includes(lower);
-      } catch { return path.basename(s.dir).toLowerCase().includes(lower); }
-    });
-    if (!hit) throw new Error(`找不到会话: ${t}`);
-    picked.push(hit);
+    const exact = items.filter((s) => s.id === t);
+    const fuzzy = items.filter(
+      (s) => s.id.toLowerCase().includes(lower) || String(titleOf(s.id) ?? '').toLowerCase().includes(lower),
+    );
+    const hit = exact.length === 1 ? exact[0] : fuzzy.length === 1 ? fuzzy[0] : undefined;
+    if (hit === undefined) {
+      if (fuzzy.length > 1) {
+        throw new Error(
+          `「${t}」命中了 ${fuzzy.length} 个会话，请写完整 id：\n` +
+            fuzzy.map((s) => `  - ${s.id}  ${titleOf(s.id) ?? '-'}`).join('\n'),
+        );
+      }
+      throw new Error(`找不到会话: ${t}`);
+    }
+    assertSessionId(hit.id, '会话 id');
+    if (sameCwd(hit.cwd, destPath)) {
+      console.log(`\n会话 ${hit.id} 已经在目标工作区，跳过。`);
+      continue;
+    }
+    if (!picked.some((p) => p.id === hit.id)) picked.push(hit);
+  }
+  if (picked.length === 0) {
+    console.log('\n没有要搬的会话。');
+    return;
   }
 
-  const plans = [];
   for (const s of picked) {
-    const { buf, header, frameCount } = readHeader(s.file);
-    const newHeader = { ...header, cwd: destPath };
-    const newPath = path.join(ROOT, projectKey(destPath), encodeSegment(header.id), LOG_NAME);
-    plans.push({ src: s, buf, header, newHeader, newPath, frameCount });
-    console.log(`\n会话 ${header.id}`);
-    console.log(`  title  = ${titleOf(header.id) ?? '-'}`);
-    console.log(`  ${header.cwd}\n    ->  ${destPath}`);
-    console.log(`  ${s.file}\n    ->  ${newPath}   (frames=${frameCount})`);
+    console.log(`\n会话 ${s.id}\n  title  = ${titleOf(s.id) ?? '-'}\n  ${s.cwd}\n    ->  ${destPath}`);
+    console.log(`  ${s.file}\n    ->  ${path.join(ROOT, projectKey(destPath), encodeSegment(s.id), LOG_NAME)}`);
   }
 
-  if (DRY) { console.log('\n--dry：只打印计划，什么都没写。'); return; }
+  if (DRY) {
+    console.log('\n--dry：只打印计划，什么都没写。');
+    return;
+  }
 
-  // 1) 备份目录
   fs.mkdirSync(BACKUP, { recursive: true });
   console.log(`\n备份目录: ${BACKUP}`);
 
-  // 2) 重写会话文件
-  for (const p of plans) {
-    const frames = scanZstdFrames(p.buf);
-    const plain = decodeFrame(frames[0]);
-    const line = firstLine(plain);
-    const oldHeader = JSON.parse(line.toString('utf8'));
-    if (oldHeader.id !== p.header.id) throw new Error('header id mismatch');
-
-    const newLine = Buffer.from(JSON.stringify(p.newHeader) + '\n', 'utf8');
-    const rebuilt = Buffer.concat([zstdFrame(newLine), ...frames.slice(1)]);
-
-    fs.mkdirSync(path.dirname(p.newPath), { recursive: true });
-    if (path.resolve(p.newPath) === path.resolve(p.src.file)) {
-      // 同目录：直接覆盖
-      fs.copyFileSync(p.src.file, path.join(BACKUP, p.header.id + '.orig'));
-      const tmp = p.newPath + '.tmp';
-      fs.writeFileSync(tmp, rebuilt);
-      fs.renameSync(tmp, p.newPath);
-    } else {
-      const tmp = p.newPath + '.tmp';
-      fs.writeFileSync(tmp, rebuilt);
-      fs.renameSync(tmp, p.newPath);
-      // 旧的 retire 到备份，然后删掉旧目录
-      const dest = path.join(BACKUP, p.src.projectKey, path.basename(p.src.dir));
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.renameSync(p.src.dir, dest);
-    }
-
-    // 3) 读回校验
-    const check = readHeader(p.newPath);
-    const plainCheck = decodeFrame(scanZstdFrames(fs.readFileSync(p.newPath), 1)[0]);
-    if (plainCheck.indexOf(10) !== plainCheck.length - 1) throw new Error('frame1 不是恰好一行 header');
-    if (check.header.cwd !== destPath) throw new Error('cwd 没改成目标路径');
-    if (check.header.id !== p.header.id) throw new Error('id 变了');
-    const records = scanZstdFrames(fs.readFileSync(p.newPath)).slice(1)
-      .reduce((n, f) => n + decodeFrame(f).toString('utf8').split('\n').filter(Boolean).length, 0);
-    console.log(`  OK ${p.header.id}: frames=${check.frameCount} cwd=${check.header.cwd} records=${records}`);
+  for (const s of picked) {
+    const moved = moveSessionFile({
+      file: s.file,
+      sessionsRoot: ROOT,
+      sessionId: s.id,
+      targetPath: destPath,
+      backupDir: BACKUP,
+    });
+    console.log(`  OK ${s.id}: frames=${moved.frames} records=${moved.records} cwd=${moved.cwd}`);
+    updateProjcache({ projcacheDir: PROJCACHE_DIR, sessionId: s.id, cwd: destPath, backupDir: BACKUP });
   }
 
-  // 4) projcache
-  for (const p of plans) {
-    const pc = path.join(PROJCACHE_DIR, p.header.id + '.json');
-    if (!fs.existsSync(pc)) { console.log(`  (无 projcache) ${p.header.id}`); continue; }
-    fs.copyFileSync(pc, path.join(BACKUP, p.header.id + '.projcache.json'));
-    const j = JSON.parse(fs.readFileSync(pc, 'utf8'));
-    const rec = j.record ?? j;
-    if (rec.identity) rec.identity.cwd = destPath;
-    if (rec.rows?.workingDirectory) rec.rows.workingDirectory.val = destPath;
-    fs.writeFileSync(pc, JSON.stringify(j, null, 2));
-    console.log(`  projcache 已更新 ${p.header.id}`);
-  }
-
-  // 5) workspace.json
-  fs.writeFileSync(path.join(BACKUP, 'workspace.json'), text);
-  const movedIds = new Set(plans.map((p) => p.header.id));
-  // 注意：必须直接改 data.tables.workspaces 里的真对象，别改 workspaces() 返回的副本
+  fs.writeFileSync(path.join(BACKUP, 'workspace.json'), Buffer.from(JSON.stringify(data, null, 2)));
+  const movedIds = new Set(picked.map((p) => p.id));
   const table = data.tables?.workspaces ?? {};
   for (const [wsId, record] of Object.entries(table)) {
     const before = Array.isArray(record.sessionIds) ? record.sessionIds : [];
@@ -315,7 +329,6 @@ function cmdMove() {
   if (table[dest.id] !== undefined) table[dest.id].updatedAt = new Date().toISOString();
   fs.writeFileSync(WS_JSON, JSON.stringify(data, null, 2));
 
-  // 读回断言：归属真的写进去了才算成功
   const check = JSON.parse(fs.readFileSync(WS_JSON, 'utf8'));
   const destIds = check.tables?.workspaces?.[dest.id]?.sessionIds ?? [];
   const missing = [...movedIds].filter((id) => !destIds.includes(id));
@@ -328,44 +341,61 @@ function cmdMove() {
     return;
   }
   console.log(`  workspace.json 已更新：${[...movedIds].join(', ')} -> ${dest.title}`);
-
   console.log(`\n完成。备份在 ${BACKUP}`);
-  console.log('现在重新打开 DeepSeek Harness，索引会在启动时重扫，就能在目标工作区里看到它。');
+  console.log('重新打开 DeepSeek Harness，索引会在启动时重扫，目标工作区里就能看到它。');
+}
+
+function sameCwd(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const norm = (p) => {
+    const r = path.resolve(p).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
 }
 
 // ---------------------------------------------------------------- 命令：verify
 function cmdVerify() {
-  const id = opt('verify');
-  const all = listSessionDirs(ROOT);
-  const hit = all.find((s) => path.basename(s.dir) === encodeSegment(String(id)) || s.dir.includes(id));
-  if (!hit) { console.log(`MISSING ${id}`); process.exitCode = 1; return; }
+  const id = assertSessionId(String(opt('verify')), '要校验的会话 id');
+  const hit = listSessionDirs(ROOT).find((s) => path.basename(s.dir) === encodeSegment(id));
+  if (!hit) {
+    console.log(`MISSING ${id}`);
+    process.exitCode = 1;
+    return;
+  }
   const buf = fs.readFileSync(hit.file);
   const frames = scanZstdFrames(buf);
   const plain1 = decodeFrame(frames[0]);
   const ok = plain1.indexOf(10) === plain1.length - 1;
   const header = JSON.parse(firstLine(plain1).toString('utf8'));
-  const records = frames.slice(1).reduce((n, f) => n + decodeFrame(f).toString('utf8').split('\n').filter(Boolean).length, 0);
-  console.log(`id=${header.id}\nfile=${hit.file}\nframes=${frames.length}\nframe1=${frames[0].length}B 明文=${plain1.length}B\nexactly-one-line=${ok}\nrecords=${records}\ncwd=${header.cwd}\nversion=${header.version}`);
+  const records = countRecords(frames);
+  console.log(
+    `id=${header.id}\nfile=${hit.file}\nframes=${frames.length}\nframe1=${frames[0].length}B 明文=${plain1.length}B\n` +
+      `exactly-one-line=${ok}\nrecords=${records}\ncwd=${header.cwd}\nversion=${header.version}`,
+  );
   if (!ok) process.exitCode = 1;
 }
 
 function cmdFrames() {
-  const file = opt('frames');
-  const buf = fs.readFileSync(String(file));
+  const file = String(opt('frames'));
+  const buf = fs.readFileSync(file);
   const frames = scanZstdFrames(buf);
   const plain1 = decodeFrame(frames[0]);
-  console.log(`file=${file}\nbytes=${buf.length}\nframes=${frames.length}\nframe1=${frames[0].length}B 明文=${plain1.length}B exactly-one-line=${plain1.indexOf(10) === plain1.length - 1}`);
+  console.log(
+    `file=${file}\nbytes=${buf.length}\nframes=${frames.length}\nframe1=${frames[0].length}B 明文=${plain1.length}B ` +
+      `exactly-one-line=${plain1.indexOf(10) === plain1.length - 1}`,
+  );
   console.log(`header=${plain1.subarray(0, Math.min(plain1.length, 200)).toString('utf8')}`);
 }
 
 // ---------------------------------------------------------------- 入口
 try {
   if (flag('list')) cmdList();
-  else if (opt('move')) cmdMove();
-  else if (opt('verify')) cmdVerify();
-  else if (opt('frames')) cmdFrames();
+  else if (opt('move') !== undefined) cmdMove();
+  else if (opt('verify') !== undefined) cmdVerify();
+  else if (opt('frames') !== undefined) cmdFrames();
   else console.log(fs.readFileSync(new URL(import.meta.url)).toString('utf8').split('*/')[0]);
-} catch (e) {
-  console.error('ERROR: ' + e.message);
+} catch (error) {
+  console.error('ERROR: ' + error.message);
   process.exitCode = 1;
 }

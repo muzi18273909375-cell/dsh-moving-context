@@ -1,6 +1,6 @@
 {
   "name": "dsh-moving-context",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "可自由移动工作区内的对话：把 DeepSeek Harness 的会话在任意工作区之间搬家（官方没有这个功能）。命令行、DSH 插件（会话行 ⋯ → 移动此聊天）与 skill 三件套，带帧重建、成员表同步、备份与三重校验。",
   "keywords": [
     "deepseek-harness",
@@ -39,14 +39,18 @@
     "lib/",
     "src/",
     "skill/",
+    "scripts/",
     "docs/",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/run-tests.mjs && node test/host-core.mjs && node test/client-smoke.mjs",
+    "test": "node test/run-tests.mjs && node test/host-core.mjs && node test/client-smoke.mjs && node test/handle-move.mjs && node test/skill-bundle.mjs && node test/hardening.mjs",
     "test:keep": "node test/run-tests.mjs --keep && node test/host-core.mjs --keep",
+    "test:scale": "node test/hardening.mjs",
+    "build:skill": "node scripts/build-skill.mjs",
     "list": "node src/move-session.mjs --list",
     "verify-dsh": "node src/e2e-check.mjs"
   },

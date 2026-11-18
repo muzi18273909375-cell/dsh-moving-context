@@ -2,13 +2,23 @@
 
 **可自由移动工作区内的对话。** 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的一个会话搬到任意另一个工作区 —— 官方没有这个功能（只有 `attachSession` / `detachSession`，没有跨工作区搬家，界面上也没有拖拽）。
 
-A CLI that moves a DeepSeek Harness session between workspaces. DSH itself ships only `attachSession` / `detachSession` / `insertSessionBefore`; there is no cross-workspace move and no drag-and-drop in the UI. This tool fills that gap.
+A CLI / plugin / skill trio that moves a DeepSeek Harness session between workspaces. DSH itself ships only `attachSession` / `detachSession` / `insertSessionBefore`; there is no cross-workspace move and no drag-and-drop in the UI. This tool fills that gap.
+
+```
+侧栏  默认工作区
+  某个对话        ⋯  ─┬─ 置顶会话
+                       ├─ 重命名
+                       ├─ 分叉会话
+                       ├─ 移动此聊天…   ← 这个工具加的
+                       ├─ 归档会话
+                       └─ 复制 Session ID
+```
 
 ---
 
 ## 它到底改了什么
 
-DSH 认为「会话属于某个工作区」要同时满足两件事，两件都要改对：
+DSH 认为「会话属于某个工作区」要同时满足三件事，三件都要改对：
 
 | 位置 | 内容 | 为什么 |
 | --- | --- | --- |
@@ -20,23 +30,13 @@ DSH 认为「会话属于某个工作区」要同时满足两件事，两件都�
 
 ## 两种用法
 
-| 怎么用 | 适合 |
-| --- | --- |
-| **插件（图形）**：会话行右侧 `⋯` → 「移动此聊天…」→ 选目标工作区 | 平时手动搬，不用关工作台 |
-| **命令行 / skill**：`--list` / `--move … --to …` | 批量搬、脚本化、agent 自己调 |
+| 怎么用 | 适合 | 要不要退出工作台 |
+| --- | --- | --- |
+| **插件（图形）**：会话行右侧 `⋯` → 「移动此聊天…」→ 选目标工作区 | 平时手动搬 | 不用，立刻生效 |
+| **命令行 / skill**：`--list` / `--move … --to …` | 批量搬、脚本化、agent 自己调 | 要（它直接改 `workspace.json`） |
 
-插件装好之后：
-
-```
-侧栏 默认工作区
-  某个对话        ⋯  ─┬─ 重命名
-                       ├─ 移动此聊天…   ← 这里
-                       └─ 删除
-```
-
-点「移动此聊天…」弹出工作区列表（带每个工作区有多少个对话），选一个就搬。
-插件走的是 DSH 自己的成员表（`WorkspaceEntity.attachSession/detachSession`）加索引重建，
-**不需要退出工作台**；命令行那半必须退出，因为它直接改 `workspace.json`。
+插件走 DSH 自己的成员表（`WorkspaceEntity.attachSession/detachSession`）加索引重建；
+命令行那半必须退出工作台，因为它直接改 `workspace.json` —— 脚本会自己检测，检测到正在运行就拒绝执行（`--force` 才硬来）。
 
 ### 装插件
 
@@ -59,10 +59,16 @@ cd ~/.dsh/profiles/desktop && pnpm install
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| `GET` | `/dsh-moving-context/api/list` | 列工作区与各自会话数 |
+| `GET` | `/dsh-moving-context/api/list` | 列工作区与各自会话数；`alive: false` 表示目录已经不在了，界面上会置灰、点不动 |
 | `POST` | `/dsh-moving-context/api/move` | `{sessionId, workspaceId}` 搬家，返回帧数/记录数/备份目录 |
 
-正在打开的那个对话拒绝搬（返回 409），先切到别的对话——文件被重写的同时它还在写盘会出事。
+会被拒绝的情况（都返回 409 或 400，不会静默改坏数据）：
+
+- 正在打开的那个对话（先切到别的对话——文件被重写的同时它还在写盘会出事）
+- 同一个对话同时点两次（第二次返回「这个对话正在搬，稍等」）
+- 已经在这个工作区了（no-op，不动文件）
+- 请求不是同源、或 `content-type` 不是 `application/json`（防 CSRF）
+- 30 秒没搬完（超时退出，原文件不动）
 
 ## 安装
 
@@ -83,17 +89,18 @@ npm link          # 之后直接 dsh-moving-context --list
 作为 DSH skill 用（推荐，agent 可以自己调）：
 
 ```bash
-# Windows
-xcopy /E /I skill "%USERPROFILE%\.dsh\skills\dsh-moving-context"
-# macOS / Linux
-mkdir -p ~/.dsh/skills/dsh-moving-context && cp -r skill/. ~/.dsh/skills/dsh-moving-context/
-# 再把脚本放进去（skill 目录里引用 src/）
-mkdir -p ~/.dsh/skills/dsh-moving-context/scripts && cp src/*.mjs ~/.dsh/skills/dsh-moving-context/scripts/
+# skill/ 里的脚本是自包含的（已经内联了 lib/core.js），拷这一个目录就够
+xcopy /E /I skill "%USERPROFILE%\.dsh\skills\dsh-moving-context"                    # Windows
+mkdir -p ~/.dsh/skills/dsh-moving-context && cp -r skill/. ~/.dsh/skills/dsh-moving-context/   # macOS / Linux
 ```
+
+> 改了 `lib/core.js` 或 `src/move-session.mjs` 之后，跑一次 `npm run build:skill` 重新生成 skill 里的副本；
+> `test/skill-bundle.mjs` 会拦住忘了同步的提交。
 
 ## 用法
 
-**先完全退出 DeepSeek Harness。** 它在运行时会用内存里的旧状态整份覆盖 `workspace.json`，你会白改。
+**命令行这半：先完全退出 DeepSeek Harness。** 它在运行时会用内存里的旧状态整份覆盖 `workspace.json`，你会白改。
+（脚本会检测 `DeepSeek Harness.exe` 进程，检测到就直接报错退出，不会让你误操作。）
 
 ```bash
 # 1) 看清现状：有哪些工作区、每个会话现在归谁、cwd 是什么、几个帧
@@ -111,11 +118,24 @@ node src/move-session.mjs --verify session-90d0ddd1
 # 5) 最硬的证据：让 DSH 自己的持久化插件复核
 node src/e2e-check.mjs "$HOME/.dsh/sessions" session-90d0ddd1-4a79-48e4-aedc-d8d77c23e10a
 #   FOUND session-... formatStatus=current cwd=<新工作区路径>
+
+# 6) 给脚本/agent 用的机器可读输出
+node src/move-session.mjs --list --json
 ```
 
 搬完**重启 DSH**。索引只在启动时建，刷新页面无效。
 
-参数：`--home <DSH 数据根>`（默认 `~/.dsh`）、`--root <会话根>`、`--workspace-json`、`--projcache`、`--frames <file>`（帧自检）、`--force`。
+参数：
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--home <dir>` | DSH 数据根，默认 `~/.dsh` |
+| `--root <dir>` | 会话根，默认 `<home>/sessions` |
+| `--workspace-json` / `--projcache` | 单独指定文件位置 |
+| `--frames <file>` | 只做帧自检（不搬） |
+| `--json` | 输出 JSON（`--list` / `--verify`） |
+| `--dry` | 只打印计划 |
+| `--force` | 忽略「DSH 正在运行」检测（**危险**：退出时可能被内存旧表覆盖） |
 
 ## 回滚
 
@@ -127,33 +147,72 @@ node src/e2e-check.mjs "$HOME/.dsh/sessions" session-90d0ddd1-4a79-48e4-aedc-d8d
 
 把这三样拷回原位、重启，就回到搬之前。
 
-## 四个必须知道的坑
+备份不会自动清理（怕误删你想留的证据）。攒多了手动删 `<home>/session-move-backup/` 下不要的时间戳目录即可。
+
+搬家中途任何一步失败都会自己回滚：新写的目标目录删掉、旧目录原地不动，并且报出可读原因（不会留下「两份会话」这种烂摊子）。
+
+## 五个必须知道的坑
 
 1. **第一帧必须恰好只有一行 header。** DSH 的 `assertZstdHeaderFrame` 要求第一帧解压后「非空，且唯一的换行在末尾」。把整份文件重压成一帧 → `corrupt Zstandard session log: first frame is not exactly one header line` → 会话被 `listArtifacts` 跳过 → 界面看不到，且没有任何报错。
-2. **别在 DSH 运行时改。** 它保存工作区状态时是整份覆盖。
+2. **别在 DSH 运行时改 `workspace.json`。** 它保存工作区状态时是整份覆盖。命令行工具会自己检测并拒绝，插件走内存里的成员表所以不受这条限制。
 3. **`--verify` 通过 ≠ 界面能看到。** 还要 `workspace.json` 的成员关系对、还要重启。三个条件缺一个都不显示，且全程静默。
 4. **往 `kind: "list"` 的 slot 注册时必须给 `id`。** `ctx.slots.register({ name, id }, Component)` 少了 `id`，客户端直接抛 `list slot "sidebar.workspaces.session.menu.item" requires options.id`，插件其余部分照常加载、界面里就是少一条菜单，只有开发者工具的 Console 里看得到。客户端半边的改动按一次 `Ctrl+R` 就重新加载，不必重启整个应用。
+5. **工作区路径结尾有全角字符时别手抄。** Windows 上确实存在 `红利工作台的迭代与维稳。`（结尾是 U+3002）这种目录，路径比较一律走 `realpath` + 大小写归一，差一个字符都会被判成两个工作区。
 
 细节机制（帧格式、projectKey 规则、源码位置）：[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
+版本与加固记录：[CHANGELOG.md](CHANGELOG.md)
+
+## 安全 / 稳健性设计
+
+对「别人拿到这个工具去跑」的场景做过针对性加固：
+
+- **会话 id 白名单**：`/^session-[A-Za-z0-9._-]{1,100}$/`，`../`、斜杠、对象、空值一律拒绝（projcache 也是拼路径的，所以同一条规则管两处）。
+- **写入原子化**：先写临时文件 → `fsync` → `rename` 覆盖，断电/崩溃不会留下半个文件。
+- **失败回滚**：新文件读回校验（cwd / id / 长度）不通过，或旧目录进不了备份，都会把新目录删掉、旧目录留在原地，然后报错。
+- **CSRF 面**：插件接口只认同源请求（`Origin` 与 `Host` 一致、`Sec-Fetch-Site: same-origin|none`）、只收 `application/json`、请求体上限 16 KB，响应带 `nosniff`。
+- **并发**：同一个会话的搬家串行化，重复请求拿 409；整体 30 秒超时。
+- **坏文件**：截断的帧报 `truncated zstd frame … at N`，空文件报 `empty session log`，都不是裸 `RangeError`。
+
+## 性能（本机实测，Windows / node 24）
+
+| 场景 | 结果 |
+| --- | --- |
+| `--list` 扫 6 个工作区 / 1200 个会话 | 352 ms（一次读盘建索引，不重复解码） |
+| 搬一个 2.7 MB、3000 条记录的会话 | 68 ms（只重压第一帧，正文帧原样搬运） |
+| 搬到别的 1200 会话的库里 | 正常，成员表与 projcache 同步更新 |
 
 ## 测试
 
 ```bash
-npm test
+npm test            # 全套 68 项
+npm run test:scale  # 只跑规模 / 回滚 / 坏文件那 12 项
+npm run build:skill # 重新生成 skill 里的自包含脚本
 ```
 
-在临时目录里造合成数据跑全套（31 项断言）：`--list` 归属识别、`--dry` 不写盘、真搬后文件/成员表/projcache 三方同步、记录数不丢、往返复原、坏文件能被 `--frames` 抓出来、错误输入明确失败且不破坏数据；本机装了 DSH 时还会用它自己的插件复核 `formatStatus=current`。
+在临时目录里造合成数据跑全套（67 项断言），不碰你真实的 `~/.dsh`：
+
+| 套件 | 项数 | 覆盖 |
+| --- | --- | --- |
+| `test/run-tests.mjs` | 31 | `--list` 归属识别、`--dry` 不写盘、真搬后文件/成员表/projcache 三方同步、记录数不丢、往返复原、错误输入明确失败且不破坏数据 |
+| `test/host-core.mjs` | 7 | 插件宿主层：搬家前后成员表与帧头、拒绝正打开的会话、幂等 |
+| `test/client-smoke.mjs` | 5 | 客户端半边：假的 `__ModuleLoader__` + 假 DOM 渲染菜单项，槽位注册必须带 `id` |
+| `test/handle-move.mjs` | 10 | 插件请求层：同源/JSON 校验、非法 id、正常搬家、幂等、成员表失败回滚、目标不存在、并发 409 |
+| `test/skill-bundle.mjs` | 3 | skill 里的自包含脚本与源码一致（防漂移） |
+| `test/hardening.mjs` | 12 | id 穿越、projcache 穿越、回滚、目标异常、坏文件、幂等、1200 会话规模、2.7 MB 大会话 |
+
+本机装了 DSH 时，`src/e2e-check.mjs` 还会用 DSH 自己的持久化插件复核 `formatStatus=current`（没装就打印 SKIP 并 0 退出，CI 里也能跑）。
 
 ## 已验证
 
 - 1343 条记录 / 748 帧的真实会话，搬出再搬回：帧数、记录数、cwd 全部还原。
 - 24 条记录的小会话同流程通过。
-- `--home` 指向临时目录的完整演练通过。
-- 搬移后 DSH 自己的 `sessionPersistence.list()` 判 `formatStatus=current`，界面侧栏能看到该会话。
+- 在两个真实工作区之间用界面上的「移动此聊天…」搬过，侧栏立刻变成目标工作区的那一行，不需要重启。
+- `--home` 指向临时目录的完整演练通过；1200 会话 / 6 工作区的规模测试通过。
+- 搬移后 DSH 自己的 `sessionPersistence.list()` 判 `formatStatus=current`。
 
 ## 卸载
 
-删掉 skill 目录 / `npm unlink` 即可，不会留下后台进程或服务。
+删掉插件目录（并从 profile 的 `dependencies` / `bundles` 里去掉）、删掉 skill 目录 / `npm unlink` 即可，不会留下后台进程或服务。
 
 ## License
 

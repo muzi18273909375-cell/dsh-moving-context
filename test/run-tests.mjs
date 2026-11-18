@@ -36,9 +36,11 @@ function ok(name, cond, detail) {
 }
 
 function run(args, expectFail = false) {
+  // 测试跑在沙箱 --home 上，跟真实工作台无关；--force 跳过「检测 DSH 是否在运行」那道闸
+  const full = [...args, '--force'];
   try {
-    const out = execFileSync(NODE, [CLI, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    if (expectFail) throw new Error('本该失败却成功了：' + args.join(' '));
+    const out = execFileSync(NODE, [CLI, ...full], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (expectFail) throw new Error('本该失败却成功了：' + full.join(' '));
     return { code: 0, out };
   } catch (error) {
     if (!expectFail) throw error;

@@ -26,9 +26,16 @@ jobs:
           node --check lib/core.js
           node --check lib/index.js
           node --check lib/client.js
+          node --check scripts/build-skill.mjs
           node --check test/run-tests.mjs
           node --check test/make-fixture.mjs
           node --check test/host-core.mjs
+          node --check test/handle-move.mjs
           node --check test/client-smoke.mjs
+          node --check test/skill-bundle.mjs
+          node --check test/hardening.mjs
+          node --check skill/scripts/move-session.mjs
       - name: 跑测试（合成沙箱，不碰真实数据）
         run: npm test
+      - name: 确认 skill 打包没有漂移
+        run: node scripts/build-skill.mjs --check

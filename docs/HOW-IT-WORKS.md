@@ -119,3 +119,34 @@ detachSession(sessionId): Promise<void>;
 ```
 
 外加 `@deepseek-ai/dsh-api-session-controller/lib/index.js:776` 新建会话时 `await workspace.attachSession(sessionId)`。**没有跨工作区 move**，所以 attach 到别的 path 的工作区也会被 `candidateMatches` 过滤掉——纯 API 搬不成立，必须改 header 的 cwd。
+
+## 7. 搬家为什么要碰三处、顺序是什么
+
+一次搬家（`lib/core.js` 的 `moveSessionFile` + `lib/index.js` 的 `handleMove`）：
+
+1. **读**：`readSessionFile()` 只解码第一帧（`scanZstdFrames(buf, 1)`），校验「第一帧恰好一行」+ header 是可解析 JSON + id 过白名单。
+2. **重压第一帧**：`JSON.stringify({...header, cwd: targetPath}) + '\n'` 压成一个独立 zstd 帧（`ZSTD_c_checksumFlag: 1`），**其余帧字节原样拼接**——正文一条记录都不重新编码，所以快、也不会改变记录内容。
+3. **原子落盘**：新目录写临时文件 → `fsync` → `rename`。
+4. **读回校验**：重新打开新文件，比对 cwd / id / 文件长度；不对就删新目录、抛错，旧目录一直没动。
+5. **退休旧目录**：`rename(<旧工程目录>/<id>, <backup>/<时间戳>/<旧工程目录>/<id>)`；失败则删新目录并抛「旧目录进不了备份，已回滚」。
+6. **改成员表**：`workspace.json` 里从原工作区 `sessionIds` 移除、往目标 `sessionIds` 插入（原子写，备份留原文）。
+7. **改投影缓存**：`session_projcache/sessions/<id>.json` 的 `record.identity.cwd` 与 `record.rows.workingDirectory.val`（原子写）。
+
+插件路径额外走 DSH 自己的 API：`registry.get(sessionId).detachSession()` → `target.attachSession()` →
+`registry.replaceHeaderIndex(await workspaceRegistry.listStoredHeaders())`（`dsh-workspace/lib/index.js:865` / `:897`）。
+这样不用退出工作台，也不会被内存里的旧表覆盖 —— 前提是 `workspace.json` 里目标工作区的 path 和 header 的新 cwd 完全一致。
+
+## 8. 加固清单（0.3.0）
+
+| 风险 | 处理 |
+| --- | --- |
+| `sessionId` 拼进 `path.join` 造成路径穿越 | `assertSessionId()` 白名单 `/^session-[A-Za-z0-9._-]{1,100}$/`，核心层与 projcache 层共用 |
+| 写到一半崩溃留下半个文件 | `writeFileAtomic()`：临时文件 → `fsync` → `rename` |
+| 搬家失败留下两份会话 | 读回校验失败 / 旧目录进不了备份 → 删新目录、旧目录不动、抛可读原因 |
+| 截断的 zstd 抛裸 `RangeError` | `scanZstdFrames` 内置 `need(n, what)` 越界检查，错误形如 `truncated zstd frame block header at 42` |
+| Windows 大小写差异被当成两个工作区 | `samePath()`：`realpath` + `toLowerCase` 比较 |
+| 插件接口 CSRF | 同源检查（`Origin`/`Host`/`Sec-Fetch-Site`）+ 只收 `application/json` + 16 KB 上限 + `nosniff` |
+| 同一会话并发搬家 | `inFlight` + 串行队列，重复请求 409，整体 30 s 超时 |
+| 插件每次搬家全量扫会话 | `locate()` 先按 owner 工作区的 path 直接拼路径，未命中才回退 `persistence.list()` |
+
+性能（本机 Windows / node 24）：1200 会话 / 6 工作区 `--list` = 352 ms；2.7 MB / 3000 条记录搬家 = 68 ms。
